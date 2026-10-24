@@ -1,6 +1,6 @@
 {
   "name": "@voyager-crew/cli",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Ask ChatGPT from your terminal or your coding agent, through the Voyager browser extension",
   "keywords": [
     "chatgpt",
