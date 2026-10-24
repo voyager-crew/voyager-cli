@@ -6,7 +6,7 @@
       "name": "@voyager-crew/cli",
       "devDependencies": {
         "@types/node": "^24.9.0",
-        "@voyager-crew/bridge-protocol": "^0.4.0",
+        "@voyager-crew/bridge-protocol": "^0.5.0",
         "fflate": "0.8.2",
         "oxfmt": "^0.65.0",
         "oxlint": "^1.80.0",
@@ -144,7 +144,7 @@
 
     "@vitest/spy": ["@vitest/spy@5.0.5", "", {}, "sha512-lwJRExuH417257Q5wv9QYugN9IMJkoxcrKrYxGPQkBzl7wlNpTUxD/5yNX4ESKVUIShKPgkGchYPFMWOOk0wzw=="],
 
-    "@voyager-crew/bridge-protocol": ["@voyager-crew/bridge-protocol@0.4.0", "", {}, "sha512-WnWGD++iLOEPyfMxOpdmwQzMv/XBpoF95dEmNLjqD81ZLMzQ2XClHyiSqwBTmDam0lDrjKhavzb2J/SjT5OaUQ=="],
+    "@voyager-crew/bridge-protocol": ["@voyager-crew/bridge-protocol@0.5.0", "", {}, "sha512-ev6lxESm4m9jCYvhos2gh+oSngdyGEeQ2N2sUlWW64jKlobb6s3g/DEl6MaElogoNkxFq0ESE8ygw77YTNPiXw=="],
 
     "assertion-error": ["assertion-error@2.0.1", "", {}, "sha512-Izi8RQcffqCeNVgFigKli1ssklIbpHnCYc6AknXGYoB6grJqyeby7jv12JUQgmTAnIDnbck1uxksT4dzN3PWBA=="],
 

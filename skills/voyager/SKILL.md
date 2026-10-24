@@ -107,11 +107,11 @@ ChatGPT sees nothing of your conversation, so the prompt carries everything. Pro
 | 2    | failed (bad input, or the page changed); `send-unverified`: the prompt may be sent     | report `error.message`; never resend `send-unverified`  |
 | 3    | needs a person (`login-required`, `challenge`, `approval-required`, `rate-limited`, …) | stop and tell the person what `error.code` asks of them |
 | 4    | wait timed out; job continues                                                          | `voyager job wait <jobId> --json` again; do not resend  |
-| 5    | busy: another job runs (`error.details.activeJobId`)                                   | wait for that job, or ask the person                    |
+| 5    | busy: no room for this job (`error.details.activeJobId`, `maxJobs`, `conflict`)        | wait for that job, or ask the person                    |
 | 6    | lost page or server (`detached`), the reply stalled (`reply-stalled`), or cancelled    | tell the person; the prompt may already be in ChatGPT   |
 | 7    | not paired, or the extension is offline                                                | ask the person to pair or open the browser              |
 
-Exactly one job runs at a time, and jobs are never queued. Each prompt is submitted **once**. After any exit other than 0, report to the person and let them decide; a second `voyager ask` with the same prompt would send it again. `send-unverified` means the page may have sent it, so the person checks ChatGPT first.
+One job runs at a time unless the person turned on parallel jobs in the Voyager popup: then `voyager status --json` shows `maxJobs` above 1, and that many jobs, of this agent or others, run side by side, each in its own tab. Jobs are never queued. Two asks into the same conversation, or two `project` changes, never run together: the later one is `busy` with `error.details.conflict`. Jobs side by side also take turns at typing and clicking: a job held up by another job stuck past the time its step may take ends with exit 5 mid-job (`error.details.pageTurn`), and that step was never sent; if it was approving an app card, the prompt is already in ChatGPT, so do not ask again. With jobs side by side, follow up only with `--chat <the conversationId your ask returned>`; never `--continue`. Each prompt is submitted **once**. After any exit other than 0, report to the person and let them decide; a second `voyager ask` with the same prompt would send it again. `send-unverified` means the page may have sent it, so the person checks ChatGPT first.
 
 ## The browser tab
 

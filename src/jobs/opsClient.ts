@@ -10,6 +10,7 @@ import {
 import type { OpCallOptions, OpsClient } from '../plugins/api';
 import { policyFailure } from '../server/extensionState';
 import { failure } from '../util/errors';
+import { type PageTurns, takesPageTurn } from './pageTurns';
 import type { TaskSlot } from './taskSlot';
 
 /** Server-side wait for an op's result when the caller gives none. */
@@ -50,6 +51,7 @@ export interface OpsClientHooks {
   readonly jobId: string;
   readonly signal: AbortSignal;
   readonly slot: TaskSlot;
+  readonly turns: PageTurns;
   readonly available: () => ReadonlySet<OpName> | null;
   /** The policy the extension last reported; undefined until it has polled. */
   readonly policy: () => PolicyState | undefined;
@@ -60,7 +62,22 @@ export interface OpsClientHooks {
 
 /** Turns one op call into one task in the slot and waits for its result. */
 export function createOpsClient(hooks: OpsClientHooks): OpsClient {
+  const { jobId, signal, slot, turns } = hooks;
+  /**
+   * Hold the page turn around `work`. It is given back only once the job's slot is empty:
+   * a task given up early (cancel, deadline) may still be acting on the page.
+   */
+  const inTurn = async <T>(work: () => Promise<T>, cleanup = false): Promise<T> => {
+    const giveBack = await turns.take(jobId, { signal, cleanup });
+    try {
+      return await work();
+    } finally {
+      await slot.idle(jobId);
+      giveBack();
+    }
+  };
   return {
+    exclusive: (work) => inTurn(work),
     async call<K extends OpName>(
       op: K,
       params: OpParamsMap[K],
@@ -79,21 +96,29 @@ export function createOpsClient(hooks: OpsClientHooks): OpsClient {
       if (!checked.ok) {
         throw failure('bad-request', `invalid params for ${op}`, { issues: checked.issues });
       }
-      hooks.onStart(op);
-      try {
-        const result = await hooks.slot.run({
-          jobId: hooks.jobId,
-          op,
-          params: checked.value,
-          deadlineMs: options.timeoutMs ?? defaultOpTimeout(op, checked.value),
-          signal: hooks.signal,
-          onProgress: (event) => hooks.onProgress(op, event),
-        });
-        // TaskSlot validated the result with `validateOpResult(op, …)`.
-        return result as OpResultMap[K];
-      } finally {
-        hooks.onEnd(op);
-      }
+      const deadlineMs = options.timeoutMs ?? defaultOpTimeout(op, checked.value);
+      const run = async (): Promise<OpResultMap[K]> => {
+        hooks.onStart(op);
+        // While this job holds the page turn, the jobs waiting for it wait as long as this op may take.
+        turns.opStarted(jobId, op, deadlineMs);
+        try {
+          const result = await slot.run({
+            jobId,
+            op,
+            params: checked.value,
+            deadlineMs,
+            signal,
+            onProgress: (event) => hooks.onProgress(op, event),
+          });
+          // TaskSlot validated the result with `validateOpResult(op, …)`.
+          return result as OpResultMap[K];
+        } finally {
+          turns.opEnded(jobId);
+          hooks.onEnd(op);
+        }
+      };
+      // Closing the tab is the job's last step: a sibling's long turn may leave the tab open, never the job running.
+      return takesPageTurn(op) ? inTurn(run, op === 'conversation.close') : run();
     },
   };
 }

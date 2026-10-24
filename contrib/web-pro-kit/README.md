@@ -10,7 +10,8 @@ If parts move into the CLI later, prioritize repository mirroring and versioned 
 Start with [RUNBOOK.md](RUNBOOK.md) for setup, project sharing rules and the daily workflow.
 
 - `scripts/`: mirror (`drive_mirror.py` with its redaction, archive, manifest and file helpers), code index,
-  shared configuration and secret patterns, request writer, delivery waiter.
+  shared configuration and secret patterns, request writer, delivery waiter, and the local lock that keeps
+  agents running side by side from publishing the same request or mirror at once.
 - `request-channel/`: sandbox reminder script, usage notes and the prompt block.
 - `templates/`: one suggested task header and a blank project header.
 - `config.example.json`: local workspace and redaction settings.

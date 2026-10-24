@@ -6,19 +6,40 @@ import {
   type CommandsResponse,
   type JobEventsResponse,
   type JobSubmitResponse,
-  type StatusResponse,
 } from '@voyager-crew/bridge-protocol';
 
+import { jobCapacity } from '../../jobs/admission';
 import { CALL_PLUGIN } from '../../plugins/callPlugin';
+import { loadConfig } from '../../state/config';
 import { failure } from '../../util/errors';
 import { CLI_VERSION } from '../../version';
 import type { Route, ServerCore } from '../http';
+import type { ServeStatus } from '../serveStatus';
 
 const JOB = '([A-Za-z0-9_-]{1,128})';
 const MAX_EVENTS_WAIT_S = 25;
 
 export function cliRoutes(core: ServerCore): Route[] {
   const { pairing, extension, runner, store, registry } = core;
+
+  /** The last unusable `maxParallelJobs` logged, so each mistake is logged once. */
+  let warnedLimit: string | undefined;
+  /** `maxParallelJobs`; a config.json that cannot be read limits nothing, and is logged. */
+  const limits = async (): Promise<{ maxParallelJobs?: number }> => {
+    const config = await loadConfig(core.paths).catch((error: unknown) => {
+      core.log.warn('config.json could not be read', { error: String(error) });
+      return { maxParallelJobs: undefined, invalidMaxParallelJobs: undefined };
+    });
+    const invalid = config.invalidMaxParallelJobs;
+    if (invalid !== undefined && invalid !== warnedLimit) {
+      core.log.warn(
+        'maxParallelJobs in config.json is not a whole number of 1 or more; running one job at a time',
+        { maxParallelJobs: invalid },
+      );
+    }
+    warnedLimit = invalid;
+    return config.maxParallelJobs === undefined ? {} : { maxParallelJobs: config.maxParallelJobs };
+  };
 
   const requireJob = async (jobId: string) => {
     const job = await store.get(jobId);
@@ -31,10 +52,16 @@ export function cliRoutes(core: ServerCore): Route[] {
       method: 'GET',
       pattern: /^\/v1\/status$/,
       access: 'cli',
-      handle: () => {
+      handle: async () => {
         const current = pairing.current;
-        const activeJob = runner.activeJob();
-        const data: StatusResponse = {
+        const { maxParallelJobs } = await limits();
+        const activeJobs = runner.activeJobs();
+        const first = activeJobs[0];
+        const activeJob =
+          first === undefined
+            ? undefined
+            : { jobId: first.jobId, ...(first.op === undefined ? {} : { op: first.op }) };
+        const data: ServeStatus = {
           extension: {
             paired: current !== null,
             lastPollAt: extension.lastPollAt,
@@ -42,8 +69,10 @@ export function cliRoutes(core: ServerCore): Route[] {
             browser: current?.browser ?? null,
             policy: extension.policy,
             account: extension.account,
+            maxTasks: extension.maxTasks,
           },
-          ...(activeJob === undefined ? {} : { activeJob }),
+          ...(activeJob === undefined ? {} : { activeJob, activeJobs }),
+          maxJobs: jobCapacity(extension.maxTasks, maxParallelJobs),
           serverVersion: CLI_VERSION,
         };
         return { status: 200, data };
@@ -94,13 +123,20 @@ export function cliRoutes(core: ServerCore): Route[] {
       method: 'POST',
       pattern: /^\/v1\/jobs$/,
       access: 'cli',
-      handle: ({ body }) => {
+      handle: async ({ body }) => {
         const checked = validateMessage('jobSubmitRequest', body);
         if (!checked.ok) throw failure('bad-request', 'invalid job', { issues: checked.issues });
         const { plugin, command, input } = checked.value;
         if (plugin === CALL_PLUGIN)
           throw failure('bad-request', `use ${BRIDGE_PATHS.call} for single ops`);
-        const job = runner.submit(plugin, command, input);
+        // Read before the synchronous submit, so two submits still meet its busy check in turn.
+        const { maxParallelJobs } = await limits();
+        const job = runner.submit(
+          plugin,
+          command,
+          input,
+          maxParallelJobs === undefined ? {} : { maxParallelJobs },
+        );
         const data: JobSubmitResponse = { jobId: job.jobId };
         return { status: 202, data };
       },

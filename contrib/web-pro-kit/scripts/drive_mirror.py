@@ -17,12 +17,17 @@ import tarfile
 import tempfile
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 import mirror_build
 from mirror_build import build, commit_files, git, repo_root
 from mirror_manifest import build_manifest, layer_ok, new_layer, policy_fingerprint, print_summary, read_mirror, write_report
 from redaction import Redactor, local_identities
 from safe_files import copy_atomic, inside, safe_segment, write_atomic
 from kit_config import load_config, workspace_root
+from local_lock import held
+
+# A push of one mirror waits this long for another push of it to finish.
+LOCK_TIMEOUT = 1800
 
 NAME_RE_T = r"^{p}-(?:text|bin)(?:-\d+of\d+)?\.zip$"
 
@@ -34,6 +39,18 @@ def mirror_dir(repo: Path, name: str | None = None, settings: dict | None = None
 
 def push(repo: Path, name: str | None, assets: bool, force: bool, out_dir: Path | None,
          settings: dict | None = None, identities: list[str] | None = None, report: Path | None = None) -> int:
+    root = repo_root(repo)
+    label = safe_segment(root.name if name is None else name, "--name")
+    settings = load_config() if settings is None else settings
+    dest = Path(out_dir) if out_dir is not None else mirror_dir(root, label, settings)
+    # Two pushes of one mirror at once would each delete the volumes the other just wrote
+    # and leave a MIRROR.json that names the wrong archives.
+    with held(dest, "mirror push", LOCK_TIMEOUT):
+        return _push(root, label, assets, force, dest, settings, identities, report)
+
+
+def _push(repo: Path, name: str | None, assets: bool, force: bool, out_dir: Path | None,
+          settings: dict | None = None, identities: list[str] | None = None, report: Path | None = None) -> int:
     repo = repo_root(repo)
     name = safe_segment(repo.name if name is None else name, "--name")
     settings = load_config() if settings is None else settings
@@ -159,7 +176,8 @@ def selftest() -> int:
         checks += 1
     saved_chunk = mirror_build.CHUNK
     try:
-        with tempfile.TemporaryDirectory(prefix="drive-mirror-test-") as td:
+        # Its own VOYAGER_HOME: the push locks of a selftest never touch the real ~/.voyager.
+        with tempfile.TemporaryDirectory(prefix="drive-mirror-test-") as td, patch.dict(os.environ, {"VOYAGER_HOME": td}):
             root = Path(td)
             repo = root / "sample"
             (repo / "src").mkdir(parents=True)

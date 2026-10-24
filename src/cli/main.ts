@@ -35,7 +35,7 @@ usage:
                                        skips one unchanged; a folder goes up as <folder>.zip
         | remove <project> <file> [--yes] deletes at once, no undo; asks, or needs --yes without a tty
         [--keep-tab]                   any project command: leave its ChatGPT tab open
-  voyager status [--json]              serve, pairing and active job
+  voyager status [--json]              serve, pairing, active jobs and how many may run at once
   voyager commands [--json]            plugin commands and extension ops
   voyager call <op> [--params JSON]    run one extension op (debugging); files.download saves the file
   voyager job list | show <id> | wait <id> [--timeout 30m] | cancel <id>
@@ -50,7 +50,8 @@ each job opens its own ChatGPT tab and closes it when it ends, also after a fail
 unless --keep-tab; one you need to look at (sign-in, an unconfirmed send) stays open
 results name the ChatGPT plan the pages last showed (JSON: account; may trail a change)
 exit codes: 0 ok, 2 failed (data), 3 needs a person, 4 wait timed out (job continues),
-            5 busy, 6 transient/detached/reply-stalled, 7 not paired or extension offline
+            5 busy (one job at a time, unless parallel jobs are on in the Voyager popup),
+            6 transient/detached/reply-stalled, 7 not paired or extension offline
             a reply saved with some files not downloaded is 0: see failedFiles (JSON) or stderr
 state: ~/.voyager (override with VOYAGER_HOME)`;
 

@@ -293,6 +293,13 @@ export const projectPlugin = definePlugin({
         'keep-tab': { type: 'boolean', summary: 'leave the bridge tab open afterwards' },
       },
       prepare,
+      // A change checks what the projects hold before it acts (a name taken, a file listed
+      // once): two at once would each see the other's half-done step. One project may go by
+      // its name in one job and its id in another, so every change shares one key.
+      conflictKey: (input: ProjectInput) =>
+        input.action === 'create' || input.action === 'upload' || input.action === 'remove'
+          ? 'project changes'
+          : undefined,
       run,
       present,
     },

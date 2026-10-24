@@ -39,7 +39,13 @@ runs neutral page ops (open a conversation, send, wait for the reply, read) in a
 opens itself. Plugins such as `ask` and `project` combine those ops; their `run()` executes
 inside serve, so a job outlives the terminal that started it.
 
-State lives in `~/.voyager/` (0700), or `$VOYAGER_HOME`: `config.json` (`{"port": 47321}`),
+Jobs run one at a time unless the extension's polls report `maxTasks` above one (its parallel
+switch is on). Then `src/jobs/admission.ts` decides whether one more job may start, each job holds
+its own slot in `src/jobs/taskSlot.ts`, and ops that type, click, open or close a tab take turns in
+`src/jobs/pageTurns.ts`, since the extension runs one of those at a time across all its tabs.
+
+State lives in `~/.voyager/` (0700), or `$VOYAGER_HOME`: `config.json` (`{"port": 47321}`, and
+optionally `driveRemote` and `maxParallelJobs`),
 `serve.json`, `serve.lock`, `cli-token` and `pairings.json` (0600), `jobs/<id>/` (the reply in
 `output/`, its downloaded files in `output/files/`, downloads still arriving in `incoming/`),
 `last-conversation.json` (0600, what `--continue` uses), `plugin-state/` (each plugin's JSON, 0600) and `logs/serve.log`.

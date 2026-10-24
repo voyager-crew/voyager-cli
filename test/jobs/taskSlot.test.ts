@@ -30,9 +30,12 @@ async function rejection(promise: Promise<unknown>): Promise<string> {
   throw new Error('expected a rejection');
 }
 
-function queue(slot: TaskSlot, options: { signal?: AbortSignal; deadlineMs?: number } = {}) {
+function queue(
+  slot: TaskSlot,
+  options: { signal?: AbortSignal; deadlineMs?: number; jobId?: string } = {},
+) {
   const promise = slot.run({
-    jobId: 'j1',
+    jobId: options.jobId ?? 'j1',
     op: 'composer.send',
     params: sendParams,
     deadlineMs: options.deadlineMs ?? 30_000,
@@ -65,7 +68,7 @@ describe('task delivery', () => {
     expect(slot.poll(view([task.taskId]))).toBeUndefined();
     expect(slot.poll(view([]))).toBeUndefined();
     expect(await rejection(result)).toBe('extension-reloaded');
-    expect(slot.current()).toBeUndefined();
+    expect(slot.tasks()).toEqual([]);
     expect(slot.poll(view([]))).toBeUndefined();
     expect(slot.ack(task.taskId).kind).toBe('gone');
   });
@@ -129,7 +132,7 @@ describe('abandoning a task', () => {
     await tick();
     controller.abort();
     expect(await rejection(result)).toBe('cancelled');
-    expect(slot.current()).toBeUndefined();
+    expect(slot.tasks()).toEqual([]);
     expect(slot.poll(view())).toBeUndefined();
   });
 
@@ -184,7 +187,7 @@ describe('abandoning a task', () => {
     expect(woken).toBe(true);
     expect(slot.poll(view([task.taskId]))).toMatchObject({ kind: 'abort', taskId: task.taskId });
     expect(slot.poll(view([]))).toBeUndefined();
-    expect(slot.current()).toBeUndefined();
+    expect(slot.tasks()).toEqual([]);
   });
 
   it('aborts with timeout when the result does not come within the deadline', async () => {
@@ -196,7 +199,7 @@ describe('abandoning a task', () => {
     expect(await rejection(result)).toBe('timeout');
     expect(slot.poll(view([task.taskId]))).toMatchObject({ kind: 'abort', reason: 'timeout' });
     expect(slot.result(task.taskId, { ok: true, data: sendResult }).kind).toBe('gone');
-    expect(slot.current()).toBeUndefined();
+    expect(slot.tasks()).toEqual([]);
   });
 
   it('fails the task and frees the slot when the extension stops polling', async () => {
@@ -206,7 +209,7 @@ describe('abandoning a task', () => {
     const task = taskOf(slot.poll(view()));
     slot.ack(task.taskId);
     expect(await rejection(result)).toBe('extension-offline');
-    expect(slot.current()).toBeUndefined();
+    expect(slot.tasks()).toEqual([]);
   });
 });
 
@@ -233,5 +236,75 @@ describe('what the extension offers', () => {
     await tick();
     expect(slot.poll(view([], { policy: 'stale', ops: new Set() }))).toBeUndefined();
     expect(await rejection(result)).toBe('policy-stale');
+  });
+});
+
+describe('slots of jobs side by side', () => {
+  it('sends the tasks of two jobs on successive polls and settles each by its own result', async () => {
+    const slot = new TaskSlot();
+    const first = queue(slot, { jobId: 'j1' });
+    const second = queue(slot, { jobId: 'j2' });
+    await tick();
+    const a = taskOf(slot.poll(view()));
+    slot.ack(a.taskId);
+    const b = taskOf(slot.poll(view([a.taskId])));
+    slot.ack(b.taskId);
+    expect([a.jobId, b.jobId]).toEqual(['j1', 'j2']);
+    expect(slot.poll(view([a.taskId, b.taskId]))).toBeUndefined();
+
+    slot.result(b.taskId, { ok: true, data: { ...sendResult, conversationId: 'c-2' } });
+    expect(await second).toMatchObject({ conversationId: 'c-2' });
+    expect(slot.tasks().map((task) => task.jobId)).toEqual(['j1']);
+    slot.result(a.taskId, { ok: true, data: sendResult });
+    expect(await first).toEqual(sendResult);
+  });
+
+  it("aborts one job's task and leaves the other's running", async () => {
+    const slot = new TaskSlot();
+    const controller = new AbortController();
+    const cancelled = queue(slot, { jobId: 'j1', signal: controller.signal });
+    const kept = queue(slot, { jobId: 'j2' });
+    await tick();
+    const a = taskOf(slot.poll(view()));
+    slot.ack(a.taskId);
+    const b = taskOf(slot.poll(view([a.taskId])));
+    slot.ack(b.taskId);
+
+    controller.abort();
+    expect(await rejection(cancelled)).toBe('cancelled');
+    expect(slot.poll(view([a.taskId, b.taskId]))).toEqual({
+      kind: 'abort',
+      taskId: a.taskId,
+      reason: 'cancelled',
+    });
+    // The page let go of the aborted task only; the other is still in flight.
+    expect(slot.poll(view([b.taskId]))).toBeUndefined();
+    expect(slot.tasks().map((task) => task.jobId)).toEqual(['j2']);
+    slot.result(b.taskId, { ok: true, data: sendResult });
+    expect(await kept).toEqual(sendResult);
+  });
+
+  it("waits for one job's slot without waiting for another's", async () => {
+    const slot = new TaskSlot();
+    void queue(slot, { jobId: 'j1' });
+    void queue(slot, { jobId: 'j2' });
+    await tick();
+    const a = taskOf(slot.poll(view()));
+    slot.ack(a.taskId);
+    let j1Idle = false;
+    let allIdle = false;
+    void slot.idle('j1').then(() => {
+      j1Idle = true;
+    });
+    void slot.idle().then(() => {
+      allIdle = true;
+    });
+    slot.result(a.taskId, { ok: true, data: sendResult });
+    await tick();
+    expect(j1Idle).toBe(true);
+    expect(allIdle).toBe(false);
+    slot.close();
+    await tick();
+    expect(allIdle).toBe(true);
   });
 });

@@ -95,12 +95,16 @@ export class FakeExtension {
   policy: PolicyReport = { revision: 1, state: 'allowed' };
   /** The ChatGPT plan each poll reports; left out of the poll while undefined. */
   account: unknown = undefined;
+  /** Tasks it runs at once, as each poll reports; left out (one) while undefined. */
+  maxTasks: number | undefined = undefined;
   readonly tasks: ValidatedBridgeTask[] = [];
+  /** Each task's start and end, in order, as the handlers ran them. */
+  readonly timeline: { readonly at: 'start' | 'end'; readonly task: ValidatedBridgeTask }[] = [];
   readonly aborts: { taskId: string; reason: string }[] = [];
   /** Server answers that failed the protocol validators; must stay empty. */
   readonly protocolErrors: string[] = [];
   unpaired = false;
-  private running: Running | undefined;
+  private readonly running = new Map<string, Running>();
   private stopped = true;
   private loopDone: Promise<void> = Promise.resolve();
   private controller = new AbortController();
@@ -147,17 +151,16 @@ export class FakeExtension {
     return response;
   }
 
-  /** One poll; `inflight` defaults to the task the fake is running. */
+  /** One poll; `inflight` defaults to the tasks the fake is running. */
   async poll(
-    inflight = this.running === undefined
-      ? []
-      : [{ taskId: this.running.task.taskId, state: 'running' as const }],
+    inflight = [...this.running.keys()].map((taskId) => ({ taskId, state: 'running' as const })),
   ): Promise<{ status: number; message?: PollResponse }> {
     const response = await this.request('POST', BRIDGE_PATHS.extPoll, {
       capabilities: { ops: this.ops },
       inflight,
       policy: this.policy,
       ...(this.account === undefined ? {} : { account: this.account }),
+      ...(this.maxTasks === undefined ? {} : { maxTasks: this.maxTasks }),
     });
     if (response.status === 204) return { status: 204 };
     const body = this.check(response, 'pollResponse');
@@ -205,9 +208,10 @@ export class FakeExtension {
       }
       if (message.kind === 'abort') {
         this.aborts.push({ taskId: message.taskId, reason: message.reason });
-        if (this.running?.task.taskId === message.taskId) {
-          this.running.aborted = true;
-          this.running = undefined;
+        const running = this.running.get(message.taskId);
+        if (running !== undefined) {
+          running.aborted = true;
+          this.running.delete(message.taskId);
         }
         continue;
       }
@@ -217,7 +221,7 @@ export class FakeExtension {
       this.tasks.push(task);
       await this.ack(task.taskId);
       const running: Running = { task, aborted: false };
-      this.running = running;
+      this.running.set(task.taskId, running);
       void this.execute(running);
     }
   }
@@ -227,6 +231,7 @@ export class FakeExtension {
     const handler = this.handlers[task.op];
     let seq = 0;
     let envelope: unknown;
+    this.timeline.push({ at: 'start', task });
     try {
       if (handler === undefined) throw new OpError('unsupported-op');
       const data = await handler(task.params, task, {
@@ -242,10 +247,12 @@ export class FakeExtension {
       const details = error instanceof OpError ? error.details : undefined;
       envelope = { ok: false, error: bridgeError(code, String(error), details) };
     }
+    this.timeline.push({ at: 'end', task });
     // An aborted task produces nothing more, like terminate('cancelled').
     if (running.aborted || this.stopped) return;
+    // Listed until its result has landed, as the extension's outbox keeps it.
     await this.result(task.taskId, envelope).catch(() => undefined);
-    if (this.running === running) this.running = undefined;
+    if (this.running.get(task.taskId) === running) this.running.delete(task.taskId);
   }
 
   private check<K extends 'helloResponse' | 'pairResponse' | 'pollResponse'>(

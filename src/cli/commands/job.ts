@@ -1,5 +1,6 @@
 import {
   BRIDGE_PATHS,
+  type BridgeError,
   bridgePath,
   isOpName,
   type JobSubmitResponse,
@@ -35,12 +36,8 @@ export async function submitAndWait(
     ({ jobId } = await submit());
   } catch (error) {
     if (error instanceof BridgeFailure && error.code === 'busy') {
-      const active = String(error.error.details?.activeJobId ?? '?');
       if (args.json) printJson({ ok: false, error: error.error });
-      else
-        note(
-          `busy: job ${active} is running. Wait with voyager job wait ${active}; jobs are not queued.`,
-        );
+      else note(busyNote(error.error));
       return EXIT.busy;
     }
     throw error;
@@ -52,6 +49,21 @@ export async function submitAndWait(
   }
   if (!args.json) note(`job ${jobId}`);
   return waitAndPresent(client, registry, jobId, { ...args, account });
+}
+
+/** Why a submit was refused, and which job to wait for. */
+export function busyNote(error: BridgeError): string {
+  const active = String(error.details?.activeJobId ?? '?');
+  const maxJobs = error.details?.maxJobs;
+  // One job at a time (an older Voyager, or parallel jobs off): the same words as before.
+  if (typeof maxJobs !== 'number' || maxJobs <= 1) {
+    return `busy: job ${active} is running. Wait with voyager job wait ${active}; jobs are not queued.`;
+  }
+  const others = error.details?.activeJobIds;
+  const several =
+    error.details?.conflict === undefined && Array.isArray(others) && others.length > 1;
+  const which = several ? ` (running: ${others.join(', ')})` : '';
+  return `busy: ${error.message}. Wait with voyager job wait ${active}${which}.`;
 }
 
 async function waitAndPresent(

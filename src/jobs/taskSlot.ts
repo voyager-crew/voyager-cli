@@ -1,9 +1,11 @@
 /**
- * The single task slot (spec §2.2 delivery, §4.3 job slot). At most one task
- * exists at a time across the whole server, so the page never runs two ops at
- * once. A task leaves the slot only when the extension can no longer be acting
- * on it: its result arrived, the extension stopped listing it after an abort,
- * or the extension stopped polling altogether.
+ * The task slots (spec §2.2 delivery, §4.3 job slot): at most one task per job,
+ * so a job's ops reach the page one after another. Jobs the runner lets run side
+ * by side (the extension allows parallel jobs) each hold a slot of their own;
+ * a poll carries one message, so their tasks go out on successive polls. A task
+ * leaves its slot only when the extension can no longer be acting on it: its
+ * result arrived, the extension stopped listing it after an abort, or the
+ * extension stopped polling altogether.
  *
  * queued → dispatched → acked → running → (released)
  *   dispatched and absent from the next poll's `inflight`: delivered again, same taskId.
@@ -86,11 +88,25 @@ export type TaskReply =
 
 const FINISHED_MEMORY = 64;
 
+export interface SlotTask {
+  readonly taskId: string;
+  readonly jobId: string;
+  readonly op: OpName;
+}
+
 export class TaskSlot {
-  private entry: Entry | undefined;
+  /** By task id, oldest first; one per job. */
+  private readonly entries = new Map<string, Entry>();
   private readonly finished = new Map<string, 'done' | 'abandoned'>();
-  private readonly idleWaiters: (() => void)[] = [];
+  /** Waiting for a job's slot to empty, or with `undefined` for every slot to. */
+  private readonly idleWaiters: {
+    readonly jobId: string | undefined;
+    readonly wake: () => void;
+  }[] = [];
   private readonly listeners = new Set<() => void>();
+  /** Inside `poll`: a change it causes is told once it has returned (see `changed`). */
+  private polling = false;
+  private changePending = false;
   private offlineTimer: NodeJS.Timeout | undefined;
   private readonly now: () => number;
   private readonly ackDeadlineMs: number;
@@ -106,11 +122,11 @@ export class TaskSlot {
     this.abortResendMs = options.abortResendMs ?? 2_000;
   }
 
-  /** Run one op through the extension; waits for the slot to be free first. */
+  /** Run one op through the extension; waits for the job's slot to be free first. */
   async run(input: RunTaskInput): Promise<unknown> {
-    await this.idle();
+    await this.idle(input.jobId);
     if (input.signal?.aborted) throw failure('cancelled', 'job was cancelled');
-    if (this.entry !== undefined) return this.run(input);
+    if (this.taskOf(input.jobId) !== undefined) return this.run(input);
     return new Promise<unknown>((resolve, reject) => {
       const entry: Entry = {
         task: {
@@ -132,7 +148,7 @@ export class TaskSlot {
         reject,
         ...(input.onProgress === undefined ? {} : { onProgress: input.onProgress }),
       };
-      this.entry = entry;
+      this.entries.set(entry.task.taskId, entry);
       this.armOffline();
       input.signal?.addEventListener('abort', () => this.abandon(entry, 'cancelled'), {
         once: true,
@@ -141,14 +157,21 @@ export class TaskSlot {
     });
   }
 
-  current(): { readonly taskId: string; readonly jobId: string; readonly op: OpName } | undefined {
-    const entry = this.entry;
-    return entry && { taskId: entry.task.taskId, jobId: entry.task.jobId, op: entry.task.op };
+  /** Every task in a slot, oldest first. */
+  tasks(): SlotTask[] {
+    return [...this.entries.values()].map(view);
   }
 
-  idle(): Promise<void> {
-    if (this.entry === undefined) return Promise.resolve();
-    return new Promise((resolve) => this.idleWaiters.push(resolve));
+  /** The task `jobId` holds, if any. */
+  taskOf(jobId: string): SlotTask | undefined {
+    const entry = [...this.entries.values()].find((item) => item.task.jobId === jobId);
+    return entry && view(entry);
+  }
+
+  /** Resolves once `jobId`'s slot is empty, or every slot when no job is named. */
+  idle(jobId?: string): Promise<void> {
+    if (this.isIdle(jobId)) return Promise.resolve();
+    return new Promise((wake) => this.idleWaiters.push({ jobId, wake }));
   }
 
   /** Called whenever the slot may have something new for a held poll. */
@@ -159,35 +182,51 @@ export class TaskSlot {
 
   /** Every poll proves the extension is alive, whatever it receives. */
   notePoll(): void {
-    if (this.entry !== undefined) this.armOffline();
+    if (this.entries.size > 0) this.armOffline();
   }
 
-  /** What this poll should carry now, or undefined to keep holding it. */
+  /**
+   * What this poll should carry now, or undefined to keep holding it. Every slot
+   * is brought up to date with what the poll lists; then the first one with
+   * something to send (an abort first, then a task) sends it.
+   */
   poll(view: PollView): PollResponse | undefined {
-    const entry = this.entry;
-    if (entry === undefined) return undefined;
+    this.polling = true;
+    try {
+      const waiting = [...this.entries.values()].filter((entry) => this.settleByPoll(entry, view));
+      const abort = waiting.find((entry) => entry.abandoned !== undefined);
+      if (abort !== undefined) return this.sendAbort(abort);
+      const next = waiting.find(
+        (entry) => entry.state === 'queued' || entry.state === 'dispatched',
+      );
+      return next === undefined ? undefined : this.dispatch(next);
+    } finally {
+      this.polling = false;
+      if (this.changePending) {
+        this.changePending = false;
+        // After the poll's own caller has taken its answer: a held poll told synchronously
+        // here would read the slots again before it sent the message just prepared.
+        queueMicrotask(() => this.changed());
+      }
+    }
+  }
+
+  /**
+   * Bring one slot up to date with a poll's `inflight`, without sending anything.
+   * True when the slot has something to send: an abort due, or its task.
+   */
+  private settleByPoll(entry: Entry, view: PollView): boolean {
     const { taskId } = entry.task;
     const listed = view.inflight.has(taskId);
 
     if (entry.abandoned !== undefined) {
-      if (!entry.delivered) {
+      if (!entry.delivered || (entry.abortDelivered && !listed)) {
         this.release(entry);
-        return undefined;
-      }
-      if (entry.abortDelivered && !listed) {
-        this.release(entry);
-        return undefined;
+        return false;
       }
       // Still listed after an abort: that abort may have gone to a connection that had
       // already dropped, so send it again, at most once per resend interval.
-      if (!entry.abortDelivered || this.now() - entry.abortSentAt >= this.abortResendMs) {
-        entry.abortDelivered = true;
-        entry.abortSentAt = this.now();
-        clearTimeout(entry.resendTimer);
-        entry.resendTimer = setTimeout(() => this.changed(), this.abortResendMs);
-        return { kind: 'abort', taskId, reason: entry.abandoned };
-      }
-      return undefined;
+      return !entry.abortDelivered || this.now() - entry.abortSentAt >= this.abortResendMs;
     }
 
     if ((entry.state === 'acked' || entry.state === 'running') && !listed) {
@@ -197,19 +236,19 @@ export class TaskSlot {
         failure('extension-reloaded', `extension lost task ${taskId} (${entry.task.op})`),
       );
       this.release(entry);
-      return undefined;
+      return false;
     }
     if (entry.state === 'dispatched' && listed) {
       entry.state = 'acked';
       clearTimeout(entry.ackTimer);
-      return undefined;
+      return false;
     }
     if (entry.state === 'queued') {
       const refused = policyFailure(view.policy, entry.task.op);
       if (refused !== undefined) {
         this.settle(entry, refused);
         this.release(entry);
-        return undefined;
+        return false;
       }
       if (view.ops !== null && !view.ops.has(entry.task.op)) {
         this.settle(
@@ -219,12 +258,19 @@ export class TaskSlot {
           }),
         );
         this.release(entry);
-        return undefined;
+        return false;
       }
-      return this.dispatch(entry);
+      return true;
     }
-    if (entry.state === 'dispatched') return this.dispatch(entry);
-    return undefined;
+    return entry.state === 'dispatched';
+  }
+
+  private sendAbort(entry: Entry): PollResponse {
+    entry.abortDelivered = true;
+    entry.abortSentAt = this.now();
+    clearTimeout(entry.resendTimer);
+    entry.resendTimer = setTimeout(() => this.changed(), this.abortResendMs);
+    return { kind: 'abort', taskId: entry.task.taskId, reason: entry.abandoned ?? 'cancelled' };
   }
 
   ack(taskId: string): TaskReply {
@@ -289,14 +335,8 @@ export class TaskSlot {
     return reply;
   }
 
-  /** Give up on the current task (cancel or deadline); the extension hears it on its next poll. */
-  abandonCurrent(reason: ErrorCode): void {
-    if (this.entry !== undefined) this.abandon(this.entry, reason);
-  }
-
   close(): void {
-    const entry = this.entry;
-    if (entry !== undefined) {
+    for (const entry of this.entries.values()) {
       this.settle(entry, failure('server-unreachable', 'voyager serve stopped'));
       this.release(entry);
     }
@@ -315,7 +355,7 @@ export class TaskSlot {
     clearTimeout(entry.ackTimer);
     entry.ackTimer = setTimeout(() => {
       // Never acked: offer it again to whichever poll comes next.
-      if (this.entry === entry && entry.state === 'dispatched' && entry.abandoned === undefined) {
+      if (this.holds(entry) && entry.state === 'dispatched' && entry.abandoned === undefined) {
         entry.state = 'queued';
         this.changed();
       }
@@ -325,7 +365,7 @@ export class TaskSlot {
   }
 
   private abandon(entry: Entry, reason: ErrorCode): void {
-    if (this.entry !== entry || entry.abandoned !== undefined) return;
+    if (!this.holds(entry) || entry.abandoned !== undefined) return;
     const message = reason === 'timeout' ? `${entry.task.op} timed out` : 'job was cancelled';
     this.settle(entry, failure(reason, message));
     clearTimeout(entry.ackTimer);
@@ -341,17 +381,17 @@ export class TaskSlot {
   private armOffline(): void {
     clearTimeout(this.offlineTimer);
     this.offlineTimer = setTimeout(() => {
-      const entry = this.entry;
-      if (entry === undefined) return;
-      // Nobody is polling, so nobody is running the task: the slot can be freed.
-      this.settle(
-        entry,
-        failure(
-          'extension-offline',
-          `no poll from the extension for ${this.extensionOfflineMs / 1000}s`,
-        ),
-      );
-      this.release(entry);
+      // Nobody is polling, so nobody is running the tasks: every slot can be freed.
+      for (const entry of this.entries.values()) {
+        this.settle(
+          entry,
+          failure(
+            'extension-offline',
+            `no poll from the extension for ${this.extensionOfflineMs / 1000}s`,
+          ),
+        );
+        this.release(entry);
+      }
     }, this.extensionOfflineMs);
   }
 
@@ -363,25 +403,39 @@ export class TaskSlot {
   }
 
   private release(entry: Entry): void {
-    if (this.entry !== entry) return;
+    if (!this.holds(entry)) return;
     clearTimeout(entry.ackTimer);
     clearTimeout(entry.deadlineTimer);
     clearTimeout(entry.resendTimer);
-    clearTimeout(this.offlineTimer);
-    this.offlineTimer = undefined;
+    this.entries.delete(entry.task.taskId);
+    if (this.entries.size === 0) {
+      clearTimeout(this.offlineTimer);
+      this.offlineTimer = undefined;
+    }
     this.finished.set(entry.task.taskId, entry.abandoned === undefined ? 'done' : 'abandoned');
     while (this.finished.size > FINISHED_MEMORY) {
       const oldest = this.finished.keys().next().value;
       if (oldest === undefined) break;
       this.finished.delete(oldest);
     }
-    this.entry = undefined;
-    for (const wake of this.idleWaiters.splice(0)) wake();
+    for (const waiter of this.idleWaiters.filter((item) => this.isIdle(item.jobId))) {
+      this.idleWaiters.splice(this.idleWaiters.indexOf(waiter), 1);
+      waiter.wake();
+    }
     this.changed();
   }
 
+  private holds(entry: Entry): boolean {
+    return this.entries.get(entry.task.taskId) === entry;
+  }
+
+  private isIdle(jobId: string | undefined): boolean {
+    if (jobId === undefined) return this.entries.size === 0;
+    return [...this.entries.values()].every((entry) => entry.task.jobId !== jobId);
+  }
+
   private match(taskId: string): Entry | undefined {
-    return this.entry?.task.taskId === taskId ? this.entry : undefined;
+    return this.entries.get(taskId);
   }
 
   private unknown(taskId: string): TaskReply {
@@ -389,6 +443,14 @@ export class TaskSlot {
   }
 
   private changed(): void {
+    if (this.polling) {
+      this.changePending = true;
+      return;
+    }
     for (const listener of this.listeners) listener();
   }
+}
+
+function view(entry: Entry): SlotTask {
+  return { taskId: entry.task.taskId, jobId: entry.task.jobId, op: entry.task.op };
 }

@@ -32,12 +32,14 @@ function readFingerprint(raw: unknown): Fingerprint | undefined {
 
 /** The stored record, keeping only well-formed entries. */
 async function load(state: PluginState): Promise<Projects> {
-  let raw: unknown;
   try {
-    raw = await state.read();
+    return parse(await state.read());
   } catch {
     return {};
   }
+}
+
+function parse(raw: unknown): Projects {
   const projects: Projects = {};
   if (!isRecord(raw) || !isRecord(raw.uploads)) return projects;
   for (const [projectId, files] of Object.entries(raw.uploads)) {
@@ -63,17 +65,19 @@ export async function fingerprintOf(
     : undefined;
 }
 
-/** Record `name`'s upload, or forget it with `undefined`. */
+/** Record `name`'s upload, or forget it with `undefined`; other jobs' records stay. */
 export async function rememberUpload(
   state: PluginState,
   projectId: string,
   name: string,
   fingerprint: Fingerprint | undefined,
 ): Promise<void> {
-  const projects = await load(state);
-  const files = { ...(Object.hasOwn(projects, projectId) ? projects[projectId] : {}) };
-  if (fingerprint) files[name] = fingerprint;
-  else delete files[name];
-  projects[projectId] = files;
-  await state.write({ version: 1, uploads: projects });
+  await state.update((raw) => {
+    const projects = parse(raw);
+    const files = { ...(Object.hasOwn(projects, projectId) ? projects[projectId] : {}) };
+    if (fingerprint) files[name] = fingerprint;
+    else delete files[name];
+    projects[projectId] = files;
+    return { version: 1, uploads: projects };
+  });
 }

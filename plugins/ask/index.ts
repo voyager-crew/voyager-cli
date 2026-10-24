@@ -25,6 +25,7 @@ import type {
 import { basename } from 'node:path';
 
 import {
+  conversationConflictKey,
   definePlugin,
   type ForegroundContext,
   type JobContext,
@@ -240,15 +241,12 @@ async function run(ctx: JobContext, input: AskInput): Promise<JobResult> {
       const shown = await callProjectOp(ctx, 'project.open', { projectId, view: 'chat' });
       await ctx.checkpoint('project', { projectId, url: shown.url });
     }
-    // Before anything is attached or typed: the prompt goes out on the model asked for.
-    const model = await chooseModel(ctx, input.model ?? DEFAULT_ASK_MODEL);
     const result = await askInTab(ctx, input, {
       startedAt,
       blobs,
       attachments,
       existing,
       opened,
-      model,
     });
     if (input.repo !== undefined) checkRepoReach(input.repo, result);
     return result;
@@ -264,37 +262,42 @@ async function askInTab(
     attachments,
     existing,
     opened,
-    model,
   }: {
     readonly startedAt: number;
     readonly blobs: readonly BlobRef[];
     readonly attachments: readonly StagedAttachment[];
     readonly existing: string | undefined;
     readonly opened: ConversationOpenResult;
-    readonly model: ModelReport;
   },
 ): Promise<JobResult> {
-  if (blobs.length > 0) {
-    const bytes = blobs.reduce((sum, blob) => sum + blob.size, 0);
-    const attached = await ctx.ops.call(
-      'composer.attach',
-      { blobs },
-      { timeoutMs: attachTimeoutMs(bytes) },
-    );
-    await ctx.checkpoint('attached', {
-      names: attached.attached.map((entry) => entry.name),
-      bytes,
-    });
-  }
+  // One turn at the page from the model choice to the send: another job's model choice
+  // in between could change what this prompt goes out on.
+  const { model, sent } = await ctx.ops.exclusive(async () => {
+    // Before anything is attached or typed: the prompt goes out on the model asked for.
+    const chosen: ModelReport = await chooseModel(ctx, input.model ?? DEFAULT_ASK_MODEL);
+    if (blobs.length > 0) {
+      const bytes = blobs.reduce((sum, blob) => sum + blob.size, 0);
+      const attached = await ctx.ops.call(
+        'composer.attach',
+        { blobs },
+        { timeoutMs: attachTimeoutMs(bytes) },
+      );
+      await ctx.checkpoint('attached', {
+        names: attached.attached.map((entry) => entry.name),
+        bytes,
+      });
+    }
 
-  const preamble = attachmentPreamble(attachments);
-  const text = preamble === '' ? input.prompt : `${input.prompt}\n\n${preamble}`;
-  // Anything but a confirmed send or a proven pre-click failure ends as send-unverified.
-  const sent = await sendOnce(ctx, {
-    text,
-    ...(blobs.length > 0 ? { expectAttachments: blobs.map((blob) => blob.name) } : {}),
-    // The person can switch chats after the open: a check after the send cannot take it back.
-    ...(existing === undefined ? {} : { expect: { conversationId: existing } }),
+    const preamble = attachmentPreamble(attachments);
+    const text = preamble === '' ? input.prompt : `${input.prompt}\n\n${preamble}`;
+    // Anything but a confirmed send or a proven pre-click failure ends as send-unverified.
+    const confirmed = await sendOnce(ctx, {
+      text,
+      ...(blobs.length > 0 ? { expectAttachments: blobs.map((blob) => blob.name) } : {}),
+      // The person can switch chats after the open: a check after the send cannot take it back.
+      ...(existing === undefined ? {} : { expect: { conversationId: existing } }),
+    });
+    return { model: chosen, sent: confirmed };
   });
   const sentAt = Date.now();
   if (existing !== undefined && sent.conversationId !== existing) {
@@ -435,6 +438,11 @@ export const askPlugin = definePlugin({
         },
       },
       prepare,
+      // Two asks into one conversation would type into it from two tabs at once.
+      conflictKey: (input: AskInput) =>
+        input.conversationId === undefined
+          ? undefined
+          : conversationConflictKey(input.conversationId),
       run,
       present: presentResponse,
     },

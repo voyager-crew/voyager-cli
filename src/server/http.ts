@@ -10,6 +10,7 @@ import { BlobStore } from '../jobs/blobStore';
 import { IncomingBlobStore } from '../jobs/incomingBlobStore';
 import { JobRunner } from '../jobs/jobRunner';
 import { JobStore } from '../jobs/jobStore';
+import type { PageTurnOptions } from '../jobs/pageTurns';
 import { TaskSlot } from '../jobs/taskSlot';
 import { PluginRegistry } from '../plugins/registry';
 import { recordLastConversation } from '../state/lastConversation';
@@ -38,6 +39,8 @@ export interface BridgeServerOptions {
   readonly ackDeadlineMs?: number;
   readonly deadlineGraceMs?: number;
   readonly abortResendMs?: number;
+  /** How long jobs wait for their turn at the page (tests). */
+  readonly pageTurns?: PageTurnOptions;
 }
 
 export type Access = 'open' | 'pair' | 'ext' | 'cli';
@@ -124,6 +127,7 @@ export async function startBridgeServer(options: BridgeServerOptions): Promise<B
     log,
     rememberConversation: (entry) => recordLastConversation(options.paths, entry),
     pluginState: (plugin) => pluginStateStore(options.paths, plugin),
+    ...(options.pageTurns === undefined ? {} : { pageTurns: options.pageTurns }),
   });
   const core: ServerCore = {
     paths: options.paths,

@@ -141,6 +141,23 @@ Review the conversation, ZIP and `NOTES.md` on either result. Extract the result
 names that differ only by case collide when extracted on Windows or macOS. `--quiet 0` disables the fallback;
 `--every` sets polling seconds. Reusing a task folder requires removing its previous marker first.
 
+## Run tasks side by side
+
+With **Run jobs in parallel** on in the Voyager popup, several agents can dispatch at once
+(`voyager status` shows how many jobs may run). The kit keeps working when they do:
+
+- Give each job its own task ID, so each has its own `REQUEST.md`, `DONE.txt` and waiter. A waiter
+  watches only its task folder; never share one task folder between jobs, or one task's outputs
+  would end another's quiet timer.
+- `drive_request.py` and `drive_mirror.py push` hold a lock on this computer for the file or mirror
+  they publish (under `$VOYAGER_HOME/locks/`, never in Drive). A second writer waits for the first
+  instead of overwriting it.
+- A mirror holds one commit at a time. Jobs on the same commit share it; for jobs on different
+  commits, publish each to its own `--name`, such as `<project>-<task-id>`: a later push replaces
+  what an earlier job is reading.
+- Two asks into one conversation never run together. Follow up with `--chat` and the conversation
+  id that job's own `ask` returned.
+
 ## Adapt and check
 
 For a different environment, locate its Drive root and Python/Git executables, set explicit paths,
@@ -158,6 +175,7 @@ python3 contrib/web-pro-kit/scripts/mirror_manifest.py --selftest
 python3 contrib/web-pro-kit/scripts/drive_mirror.py --selftest
 python3 contrib/web-pro-kit/scripts/drive_request.py --selftest
 python3 contrib/web-pro-kit/scripts/drive_wait.py --selftest
+python3 contrib/web-pro-kit/scripts/local_lock.py --selftest
 python3 contrib/web-pro-kit/request-channel/channel.py --selftest
 bunx --no-install oxfmt --check contrib/web-pro-kit
 ```

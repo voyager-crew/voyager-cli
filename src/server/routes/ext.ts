@@ -70,9 +70,9 @@ async function readBlob(core: ServerCore, ctx: RouteContext): Promise<Reply> {
   if (!checked.ok) throw failure('bad-request', 'invalid chunk range', { issues: checked.issues });
   const blob = core.blobs.get(ctx.params[0]);
   if (blob === undefined) throw failure('not-found', 'no such blob');
-  const task = core.slot.current();
+  const task = core.slot.taskOf(blob.jobId);
   const uploads = task?.op === 'composer.attach' || task?.op === 'project.upload';
-  if (task === undefined || task.jobId !== blob.jobId || !uploads) {
+  if (task === undefined || !uploads) {
     throw failure('gone', 'no upload of this blob is running');
   }
   const { offset, length } = checked.value;
@@ -84,8 +84,8 @@ async function readBlob(core: ServerCore, ctx: RouteContext): Promise<Reply> {
 
 /** Downloads are written only by the job's own `files.download` task, while it runs. */
 function requireDownloadTask(core: ServerCore, jobId: string, taskId: string): void {
-  const task = core.slot.current();
-  if (task?.op !== 'files.download' || task.jobId !== jobId || task.taskId !== taskId) {
+  const task = core.slot.taskOf(jobId);
+  if (task?.op !== 'files.download' || task.taskId !== taskId) {
     throw failure('gone', 'no files.download of this job is running as that task');
   }
 }
@@ -157,6 +157,8 @@ async function poll(core: ServerCore, ctx: RouteContext): Promise<Reply> {
   core.extension.ops = request.capabilities.ops;
   core.extension.policy = request.policy;
   core.extension.account = request.account ?? null;
+  // Absent from a Voyager without parallel jobs; `voyager status` tells that apart from "off".
+  core.extension.maxTasks = request.maxTasks ?? null;
   core.slot.notePoll();
   // A newer poll replaces a held one (the service worker restarted, or retried).
   core.heldPoll?.();

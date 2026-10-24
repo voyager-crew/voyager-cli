@@ -6,24 +6,33 @@ import {
   type OpName,
 } from '@voyager-crew/bridge-protocol';
 /**
- * The single job slot (spec §4.3/§4.4). One active job at a time; a second
- * submit is refused with `busy`, never queued. A job reaches its final status
- * only once the task slot is empty, so a cancelled job cannot overlap the next
- * one on the page.
+ * The job slots (spec §4.3/§4.4). One active job at a time, or several while
+ * the extension allows parallel jobs (`./admission.ts`); a submit past that is
+ * refused with `busy`, never queued. A job reaches its final status only once
+ * its task slot is empty, so a cancelled job cannot overlap the next op on the
+ * page, and jobs side by side take turns at the page (`./pageTurns.ts`).
  */
 import { join } from 'node:path';
 
-import type { CommandDef, JobContext, PluginState } from '../plugins/api';
+import {
+  type CommandDef,
+  conversationConflictKey,
+  type JobContext,
+  type PluginState,
+} from '../plugins/api';
 import { CALL_PLUGIN } from '../plugins/callPlugin';
 import type { PluginRegistry } from '../plugins/registry';
 import { type ExtensionState, policyFailure } from '../server/extensionState';
 import type { LastConversation } from '../state/lastConversation';
+import { type StoredPluginState, withSerialUpdates } from '../state/pluginState';
 import { failure, toBridgeError } from '../util/errors';
 import type { Logger } from '../util/log';
+import { admissionFailure, jobCapacity } from './admission';
 import type { BlobStore } from './blobStore';
 import type { IncomingBlobStore } from './incomingBlobStore';
 import { isTerminal, type JobRecord, type JobStore } from './jobStore';
 import { createOpsClient } from './opsClient';
+import { type PageTurnOptions, PageTurns } from './pageTurns';
 import type { TaskSlot } from './taskSlot';
 
 export interface JobRunnerDeps {
@@ -39,29 +48,58 @@ export interface JobRunnerDeps {
   /** Told about the conversation of each job that succeeds with one (`ask --continue`). */
   readonly rememberConversation?: (entry: LastConversation) => Promise<void>;
   /** Each plugin's own state; kept in memory for the runner's life when not given. */
-  readonly pluginState?: (plugin: string) => PluginState;
+  readonly pluginState?: (plugin: string) => StoredPluginState;
+  /** How long a job waits for its turn at the page; the defaults outside tests. */
+  readonly pageTurns?: PageTurnOptions;
 }
 
 interface Active {
   readonly job: JobRecord;
   readonly controller: AbortController;
   readonly done: Promise<void>;
+  readonly alone: boolean;
+  /** What it works on: its command's key from the start, its conversation once that is known. */
+  readonly conflictKeys: Set<string>;
+}
+
+/** A running job as `voyager status` shows it. */
+export interface ActiveJobView {
+  readonly jobId: string;
+  readonly op?: OpName;
+  /** `holding`: it acts on its page now; `waiting`: for another job to let go first. */
+  readonly pageTurn?: 'holding' | 'waiting';
+}
+
+export interface SubmitOptions {
+  /** `maxParallelJobs` from config.json: fewer jobs at once than the extension allows. */
+  readonly maxParallelJobs?: number;
 }
 
 export class JobRunner {
-  private active: Active | undefined;
+  /** By job id, oldest first. */
+  private readonly active = new Map<string, Active>();
   private readonly memoryState = new Map<string, unknown>();
+  private readonly turns: PageTurns;
+  /** Per plugin, its newest state update: updates of jobs side by side run one after another. */
+  private readonly stateUpdates = new Map<string, { current: Promise<unknown> }>();
 
-  constructor(private readonly deps: JobRunnerDeps) {}
+  constructor(private readonly deps: JobRunnerDeps) {
+    this.turns = new PageTurns(deps.pageTurns);
+  }
 
   /** Synchronous up to the busy check, so concurrent submits cannot both pass it. */
-  submit(plugin: string, command: string, input: unknown): JobRecord {
-    if (this.active !== undefined) {
-      throw failure('busy', 'another job is running; it is not queued', {
-        activeJobId: this.active.job.jobId,
-      });
-    }
+  submit(plugin: string, command: string, input: unknown, options: SubmitOptions = {}): JobRecord {
     const def = this.deps.registry.command(plugin, command);
+    const running = [...this.active.values()].map((entry) => ({
+      jobId: entry.job.jobId,
+      alone: entry.alone,
+      conflictKeys: [...entry.conflictKeys],
+    }));
+    const alone = plugin === CALL_PLUGIN;
+    const conflictKey = conflictKeyOf(def, input);
+    const capacity = jobCapacity(this.deps.extension.maxTasks, options.maxParallelJobs);
+    const busy = admissionFailure(running, { alone, conflictKey }, capacity);
+    if (busy !== undefined) throw busy;
     if (def === undefined) throw failure('bad-request', `unknown command ${plugin} ${command}`);
     if (!this.deps.isPaired()) {
       throw failure('not-paired', 'no extension is paired; run `voyager pair`');
@@ -83,35 +121,44 @@ export class JobRunner {
     const job = this.deps.store.create(plugin, command, input);
     const controller = new AbortController();
     this.deps.store.appendEvent(job.jobId, 'status', { status: 'running' });
+    const conflictKeys = new Set(conflictKey === undefined ? [] : [conflictKey]);
     const done = this.execute(job, def, controller);
-    this.active = { job, controller, done };
+    this.active.set(job.jobId, { job, controller, done, alone, conflictKeys });
     return job;
   }
 
-  activeJob(): { jobId: string; op?: OpName } | undefined {
-    if (this.active === undefined) return undefined;
-    const op = this.deps.slot.current()?.op;
-    return op === undefined
-      ? { jobId: this.active.job.jobId }
-      : { jobId: this.active.job.jobId, op };
+  /** Every running job, oldest first, with the op it runs now and where it stands for the page turn. */
+  activeJobs(): ActiveJobView[] {
+    const holder = this.turns.current();
+    const waiting = new Set(this.turns.waiting());
+    return [...this.active.keys()].map((jobId) => {
+      const op = this.deps.slot.taskOf(jobId)?.op;
+      const pageTurn = holder === jobId ? 'holding' : waiting.has(jobId) ? 'waiting' : undefined;
+      return {
+        jobId,
+        ...(op === undefined ? {} : { op }),
+        ...(pageTurn === undefined ? {} : { pageTurn }),
+      };
+    });
   }
 
   async cancel(jobId: string): Promise<JobRecord> {
     const job = await this.deps.store.get(jobId);
     if (job === undefined) throw failure('not-found', `no job ${jobId}`);
-    if (this.active?.job !== job) {
+    const active = this.active.get(jobId);
+    if (active?.job !== job) {
       throw failure('gone', `job ${jobId} has already ended (${job.status})`);
     }
     if (job.status !== 'cancelling') {
       this.setStatus(job, 'cancelling');
-      this.active.controller.abort();
+      active.controller.abort();
     }
     return job;
   }
 
-  /** Resolves when the active job (if any) has fully ended. */
+  /** Resolves when every active job has fully ended. */
   async settled(): Promise<void> {
-    await this.active?.done;
+    await Promise.all([...this.active.values()].map((entry) => entry.done));
   }
 
   private async execute(
@@ -138,7 +185,7 @@ export class JobRunner {
       status = statusForError(error, job.checkpoints);
     }
     // The page may still hold an abandoned task; the job ends only when it lets go.
-    await this.deps.slot.idle();
+    await this.deps.slot.idle(job.jobId);
     this.deps.blobs.forgetJob(job.jobId);
     // Downloads the job did not save go with it; a failed delete never changes its outcome.
     await this.deps.incoming.forgetJob(job.jobId).catch((error: unknown) => {
@@ -162,7 +209,7 @@ export class JobRunner {
       ...(error === undefined ? {} : { error }),
     });
     this.deps.log.info('job finished', { jobId: job.jobId, status, code: error?.code });
-    this.active = undefined;
+    this.active.delete(job.jobId);
   }
 
   private context(job: JobRecord, controller: AbortController): JobContext {
@@ -171,6 +218,7 @@ export class JobRunner {
       jobId: job.jobId,
       signal: controller.signal,
       slot,
+      turns: this.turns,
       available: () => extension.opNames(),
       policy: () => extension.policy?.state,
       onStart: (op) => {
@@ -194,6 +242,12 @@ export class JobRunner {
       },
       progress: (event) => store.appendEvent(job.jobId, 'progress', event),
       checkpoint: async (name, data) => {
+        // Known now, so held from now: an `ask --chat <this id>` beside it would type into it too.
+        if (typeof data.conversationId === 'string') {
+          this.active
+            .get(job.jobId)
+            ?.conflictKeys.add(conversationConflictKey(data.conversationId));
+        }
         job.checkpoints[name] = data;
         store.update(job, {});
         store.appendEvent(job.jobId, 'checkpoint', { name, data });
@@ -211,10 +265,7 @@ export class JobRunner {
           );
         }
       },
-      state: this.deps.pluginState?.(job.plugin) ?? {
-        read: async () => this.memoryState.get(job.plugin),
-        write: async (value) => void this.memoryState.set(job.plugin, value),
-      },
+      state: this.pluginState(job.plugin),
       log: {
         info: (message, fields) => {
           store.appendEvent(job.jobId, 'log', { level: 'info', message, ...fields });
@@ -226,6 +277,20 @@ export class JobRunner {
         },
       },
     };
+  }
+
+  /** A plugin's state, whose `update`s from jobs side by side run one after another. */
+  private pluginState(plugin: string): PluginState {
+    const base: StoredPluginState = this.deps.pluginState?.(plugin) ?? {
+      read: async () => this.memoryState.get(plugin),
+      write: async (value: unknown) => void this.memoryState.set(plugin, value),
+    };
+    let last = this.stateUpdates.get(plugin);
+    if (last === undefined) {
+      last = { current: Promise.resolve() };
+      this.stateUpdates.set(plugin, last);
+    }
+    return withSerialUpdates(base, last);
   }
 
   private async remember(
@@ -255,6 +320,15 @@ export class JobRunner {
     if (isTerminal(job.status)) return;
     this.deps.store.update(job, { status });
     this.deps.store.appendEvent(job.jobId, 'status', { status });
+  }
+}
+
+/** The input is the client's JSON, unchecked: a key that cannot be read is no key. */
+function conflictKeyOf(def: CommandDef | undefined, input: unknown): string | undefined {
+  try {
+    return def?.conflictKey?.(input);
+  } catch {
+    return undefined;
   }
 }
 

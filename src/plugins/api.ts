@@ -50,6 +50,12 @@ export interface ForegroundContext {
 export interface PluginState {
   read(): Promise<unknown>;
   write(value: unknown): Promise<void>;
+  /**
+   * Read, change and write it back in one step: jobs of the plugin that run side by
+   * side never lose each other's writes. `change` gets what `read` returns, or
+   * undefined when the state cannot be read.
+   */
+  update(change: (current: unknown) => unknown): Promise<void>;
 }
 
 export interface Logger {
@@ -68,6 +74,12 @@ export interface OpsClient {
     params: OpParamsMap[K],
     options?: OpCallOptions,
   ): Promise<OpResultMap[K]>;
+  /**
+   * Keep the page turn across `work`, so no other job types or clicks in between
+   * (model choice, attachments and the send that relies on them). Ops that only
+   * wait or read never need it; with one job at a time it changes nothing.
+   */
+  exclusive<T>(work: () => Promise<T>): Promise<T>;
 }
 
 /** What the foreground recorded about a staged file; `register` refuses a file that differs. */
@@ -126,6 +138,11 @@ export interface CommandDef<I = unknown> {
   readonly args?: readonly ArgDef[];
   readonly options?: Readonly<Record<string, OptionDef>>;
   prepare(fg: ForegroundContext, argv: ParsedArgs): Promise<I>;
+  /**
+   * What this job must not share with another running job (a conversation, a
+   * project), when jobs run side by side; a second job on the same key is `busy`.
+   */
+  conflictKey?(input: I): string | undefined;
   run(ctx: JobContext, input: I): Promise<JobResult>;
   /** Phase C: resume a detached job with read-side ops only. */
   harvest?(ctx: JobContext, checkpoint: Checkpoint): Promise<JobResult>;
@@ -140,6 +157,14 @@ export interface VoyagerPlugin {
   // Each command fixes its own input type; the registry only moves `unknown` between them.
   // oxlint-disable-next-line typescript/no-explicit-any
   readonly commands: Readonly<Record<string, CommandDef<any>>>;
+}
+
+/**
+ * The conflict key of a conversation. A job holds it from submit when its input names the
+ * conversation, and from its first checkpoint with a `conversationId` otherwise.
+ */
+export function conversationConflictKey(conversationId: string): string {
+  return `conversation ${conversationId}`;
 }
 
 export function definePlugin<P extends VoyagerPlugin>(plugin: P): P {

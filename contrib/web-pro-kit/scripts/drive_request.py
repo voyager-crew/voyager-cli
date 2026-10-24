@@ -9,8 +9,13 @@ import re
 import sys
 import tempfile
 from unittest.mock import patch
+import threading
 from kit_config import load_config, workspace_root
+from local_lock import held
 import safe_files
+
+# Agents dispatching side by side may steer the same task; each waits its turn this long.
+LOCK_TIMEOUT = 120
 
 HEAD_RE = re.compile(r"^Version: (\d+)", re.M)
 
@@ -22,6 +27,12 @@ def request_path(workspace: Path, tag: str) -> Path:
 
 
 def append(request: Path, body: str) -> int:
+    # Two writers reading the same version would both publish N+1 and one request would be lost.
+    with held(request, "request", LOCK_TIMEOUT):
+        return _append(request, body)
+
+
+def _append(request: Path, body: str) -> int:
     # utf-8-sig: a BOM added by a Windows editor would hide "Version:" and restart the count at 1.
     old = request.read_text(encoding="utf-8-sig") if request.exists() else ""
     match = HEAD_RE.search(old)
@@ -40,7 +51,7 @@ def append(request: Path, body: str) -> int:
 
 
 def selftest() -> int:
-    with tempfile.TemporaryDirectory() as temporary:
+    with tempfile.TemporaryDirectory() as temporary, patch.dict("os.environ", {"VOYAGER_HOME": temporary}):
         workspace = Path(temporary)
         request = request_path(workspace, "sample-task")
         assert append(request, "First") == 1
@@ -75,7 +86,25 @@ def selftest() -> int:
                 raise AssertionError("Expected a failed publish")
         assert bom.read_bytes() == before
         assert sorted(p.name for p in bom.parent.iterdir()) == ["REQUEST.md"]
-    print("selftest PASS: 13 checks")
+
+        # Two agents append at once: a slow read would let both see version N without the lock.
+        shared = request_path(workspace, "shared-task")
+        real_read = Path.read_text
+
+        def slow_read(self, *args, **kwargs):
+            text = real_read(self, *args, **kwargs)
+            threading.Event().wait(0.05)
+            return text
+        with patch.object(Path, "read_text", slow_read):
+            append(shared, "Base")
+            writers = [threading.Thread(target=append, args=(shared, f"Agent {n}")) for n in (1, 2)]
+            for writer in writers:
+                writer.start()
+            for writer in writers:
+                writer.join()
+        text = shared.read_text(encoding="utf-8")
+        assert text.startswith("Version: 3") and "Agent 1" in text and "Agent 2" in text, text
+    print("selftest PASS: 14 checks")
     return 0
 
 
