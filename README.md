@@ -51,6 +51,8 @@ voyager ask "Explain this stack trace" --attach crash.log
 voyager ask "Look over the repo" --attach ./src     # folders go up as a zip, secrets left out
 voyager ask --model high "Quick sanity check"       # pro (default), extra-high, high, medium, instant
 voyager ask --chat <link|id> "And the edge cases?"  # follow up in a conversation
+voyager ask --preset math "Prove this claim"        # prepend the mathematical research opening
+voyager ask --preset <file> "Review this argument"  # prepend a UTF-8 text file, trimmed (up to 20,000 characters)
 voyager read <link|id>                              # save a conversation's latest reply
 ```
 

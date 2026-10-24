@@ -24,6 +24,7 @@ import type {
  */
 import { basename } from 'node:path';
 
+import { resolvePreset } from '../../src/cli/presets';
 import {
   conversationConflictKey,
   definePlugin,
@@ -131,6 +132,7 @@ async function prepare(fg: ForegroundContext, argv: ParsedArgs): Promise<AskInpu
   }
   const asked = argv.positionals.join(' ').trim();
   if (asked === '') throw failure('bad-request', 'usage: voyager ask "<prompt>"');
+  const preset = await resolvePreset(argv.options.preset, fg.cwd);
   const model = parseAskModel(argv.options.model);
   const project =
     typeof argv.options.project === 'string' ? argv.options.project.trim() : undefined;
@@ -158,6 +160,7 @@ async function prepare(fg: ForegroundContext, argv: ParsedArgs): Promise<AskInpu
   if (repo !== undefined) fg.note(`repo: ChatGPT is asked to write only to ${repo.branch}`);
   const timebox = parseTimebox(argv.options.timebox);
   const prompt = [
+    preset,
     asked,
     drive.block,
     repo === undefined ? '' : repoPromptBlock(repo),
@@ -382,6 +385,10 @@ export const askPlugin = definePlugin({
       summary: 'Ask ChatGPT (a new conversation, or --chat / --continue) and save the reply',
       args: [{ name: 'prompt', summary: 'the message to send', variadic: true }],
       options: {
+        preset: {
+          type: 'string',
+          summary: 'prepend a built-in preset (math) or a UTF-8 text file to the prompt',
+        },
         'keep-tab': { type: 'boolean', summary: 'leave the bridge tab open afterwards' },
         chat: {
           type: 'string',

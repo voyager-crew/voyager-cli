@@ -23,6 +23,8 @@ usage:
   voyager ask "<prompt>" [--json]      new conversation, send, wait, save response.md
                                        and the files the reply offers under files/
         [--attach <file|folder>]...    upload files; folders are zipped, credentials left out
+        [--preset math]                prepend the mathematical research opening
+        [--preset <file>]              prepend a UTF-8 text file, trimmed (up to 20,000 characters)
         [--dry-run]                    pack attachments and print the job input, send nothing
         [--chat <link|id> | --continue] ask in an existing conversation, or the last one used
         [--project <name|id>]          ask in a new chat of a ChatGPT project (its files are there)

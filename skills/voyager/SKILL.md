@@ -98,6 +98,7 @@ ChatGPT sees nothing of your conversation, so the prompt carries everything. Pro
 - Say what it cannot see: callers outside the material, and the real defaults (timeouts, limits), so it does not rate severity from settings nobody uses.
 - In ordinary debugging or review work, avoid words like bypass, exploit, attack, inject, payload or crack; a safety check can take such a prompt for intrusion work and stop the turn halfway. Say workaround, trigger condition, defect or stress test.
 - When files should come back, ask for one ZIP.
+- For a mathematics question (a proof, a derivation, an algorithm's correctness or bound), add `--preset math`. It opens the prompt with a research framing: a long session, depth before speed, every conclusion derived, verified or marked as a conjecture. `--preset <file>` opens it with a text file instead, for an opening the person wrote; `--dry-run` shows the combined prompt.
 
 ## Exit codes
 
