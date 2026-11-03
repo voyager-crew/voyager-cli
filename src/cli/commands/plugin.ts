@@ -11,6 +11,7 @@ import type { StatePaths } from '../../state/paths';
 import { newId } from '../../util/ids';
 import { parse, waitTimeout, WAIT_OPTIONS } from '../args';
 import { note, printJson } from '../output';
+import { submitWithFreshPolicy } from '../policyRefresh';
 import { submitAndWait } from './job';
 
 /** Staging folders a command left behind (a refused submit, a dry run) go after a day. */
@@ -95,10 +96,12 @@ export async function pluginCommand(
       timeoutMs: waitTimeout(args),
     },
     () =>
-      client.request<JobSubmitResponse>('POST', BRIDGE_PATHS.jobs, {
-        plugin: found.plugin.name,
-        command: found.command,
-        input,
-      }),
+      submitWithFreshPolicy(client, () =>
+        client.request<JobSubmitResponse>('POST', BRIDGE_PATHS.jobs, {
+          plugin: found.plugin.name,
+          command: found.command,
+          input,
+        }),
+      ),
   );
 }

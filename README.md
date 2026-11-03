@@ -149,6 +149,9 @@ reported it.
   end, also after a failure; pass `--keep-tab` to leave it open. If ChatGPT asks you to sign in
   or solve a challenge, Voyager CLI stops, leaves that tab open and says so (exit 3); it never
   works around it.
+- The extension refuses jobs while its page data is missing or over 24 hours old (`policy-stale`).
+  Commands then refresh it once from voyager.nagi.fun and go on; if that fails, they stop before
+  sending anything and say why. `voyager call catalog.refresh` tries again.
 - `voyager update` updates everything it can: the CLI (when npm installed it globally),
   `voyager serve` (restarted unless a job is running) and the extension's page data, fetched now
   instead of at its next check. Your browser's store updates the extension itself.
