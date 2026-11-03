@@ -125,6 +125,7 @@ agent 可以同时提问，回复一起等；输入和点击仍会轮流进行�
 - `ask`、`read` 和所有 `project` 命令都会自己打开一个 ChatGPT 标签页，结束时关掉，失败了也关；
   想留着就加 `--keep-tab`。如果 ChatGPT 要求登录或人机验证，Voyager CLI 会停下来、留着那个
   标签页并告诉你（退出码 3），不会绕过。
+- 扩展的页面数据缺失或超过 24 小时未更新时，会拒绝新任务（`policy-stale`）。这时命令会先从 voyager.nagi.fun 刷新一次再继续；刷新失败就在发送前停下并说明原因，之后可以用 `voyager call catalog.refresh` 重试。
 - `voyager update` 把能更新的都更新一遍：命令行本身（用 npm 全局安装时）、`voyager serve`
   （没有任务在跑时重启）和扩展的页面数据（立即重新获取，不等下一次定时检查）。扩展本身由浏览器的
   扩展商店更新。
