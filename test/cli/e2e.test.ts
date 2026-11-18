@@ -280,4 +280,35 @@ describe('pair → ask → response.md', () => {
     expect(human.stdout).toContain('do not resend');
     expect(human.stderr).toContain('send-unverified');
   }, 30_000);
+
+  it('refreshes a stale policy by itself before asking, and sends the prompt once', async () => {
+    const fake = fakes[0];
+    const ops = fake.ops;
+    fake.handlers = { ...ASK_HANDLERS };
+    fake.handlers['catalog.refresh'] = () => {
+      fake.policy = { revision: 2, state: 'allowed' };
+      fake.ops = ops;
+      return { host: 'chatgpt.com', status: 'updated', revision: 2, extensionVersion: '2.3.1' };
+    };
+    // Restart the loop so serve hears the policy now, not when the poll it holds ends.
+    await fake.stop();
+    fake.policy = { revision: 0, state: 'stale' };
+    fake.ops = [{ name: 'catalog.refresh', v: 1 }];
+    fake.start();
+    await until(async () => {
+      const { extension } = json(await voyager(['status', '--json'])) as {
+        extension: { policy: { state: string } | null };
+      };
+      return extension.policy?.state === 'stale';
+    });
+    const sends = () => fake.tasks.filter((task) => task.op === 'composer.send').length;
+    const sentBefore = sends();
+
+    const asked = await voyager(['ask', 'Reply with OK', '--json']);
+
+    expect(asked.code, asked.stderr).toBe(0);
+    expect(json(asked).status).toBe('succeeded');
+    expect(asked.stderr).toContain('refreshing it from voyager.nagi.fun');
+    expect(sends()).toBe(sentBefore + 1);
+  }, 30_000);
 });

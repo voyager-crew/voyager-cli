@@ -26,7 +26,7 @@ export function policyFailure(
   if (state === 'stale') {
     return failure(
       'policy-stale',
-      'the extension policy is out of date; turn on online plugin updates in Voyager',
+      'the extension policy is out of date; run `voyager call catalog.refresh` while the browser can reach voyager.nagi.fun',
     );
   }
   return undefined;

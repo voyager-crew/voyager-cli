@@ -102,6 +102,8 @@ ChatGPT sees nothing of your conversation, so the prompt carries everything. Pro
 
 ## Exit codes
 
+`policy-stale` (exit 3) means voyager already tried to refresh the extension's page data and could not; nothing was sent, and `error.message` says why. It usually means the browser cannot reach voyager.nagi.fun. Once it can, run the same command again.
+
 | Code | Meaning                                                                                | Next step                                               |
 | ---- | -------------------------------------------------------------------------------------- | ------------------------------------------------------- |
 | 0    | succeeded (also when some `failedFiles` could not be downloaded)                       | read `responsePath` and `files`; report `failedFiles`   |
