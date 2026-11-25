@@ -13,7 +13,7 @@ import type {
 import { join } from 'node:path';
 
 import type { FinishedJob, JobContext } from '../../src/plugins/api';
-import { toBridgeError } from '../../src/util/errors';
+import { failure, toBridgeError } from '../../src/util/errors';
 import { writeFileExclusive, writeJsonAtomic } from '../../src/util/files';
 import { sha256Hex } from '../../src/util/hash';
 import { downloadReplyFiles, UPDATE_FOR_FILES, type ReplyFiles } from './files';
@@ -41,6 +41,27 @@ function manifest(read: TurnsReadResult, saved: SavedResponse, files: ReplyFiles
     turnKey: read.turnKey,
     textSha256: read.textSha256,
   };
+}
+
+/**
+ * Refuse a read with no text and no files: the page can answer before it has
+ * loaded the reply (voyager#1106), and saving that would report an empty
+ * `response.md` as success. A reply of files alone still counts.
+ */
+export function requireReplyContent(
+  read: TurnsReadResult,
+  conversationId: string,
+  sent: boolean,
+): void {
+  if (read.markdown.trim() !== '' || read.files.length > 0) return;
+  const retry = `read it again with: voyager read ${conversationId}`;
+  throw failure(
+    'unverified',
+    sent
+      ? `the prompt was sent, but its reply read back empty (no text, no files); do not resend, ${retry}`
+      : `the reply read back empty (no text, no files), so nothing was saved; ${retry}`,
+    { conversationId, turnKey: read.turnKey },
+  );
 }
 
 /** `response.md` and `manifest.json` in the job's output folder. */

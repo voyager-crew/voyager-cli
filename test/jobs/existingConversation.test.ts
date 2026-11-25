@@ -4,7 +4,8 @@
  * remembers for the next `--continue`.
  */
 import { BRIDGE_PATHS, bridgePath, type JobSubmitResponse } from '@voyager-crew/bridge-protocol';
-import { readFile, rm, stat } from 'node:fs/promises';
+import { access, readFile, rm, stat } from 'node:fs/promises';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { askPlugin, type AskInput } from '../../plugins/ask/index';
@@ -13,10 +14,31 @@ import type { JobDetail } from '../../src/jobs/jobStore';
 import type { ForegroundContext } from '../../src/plugins/api';
 import { readLastConversation, recordLastConversation } from '../../src/state/lastConversation';
 import { BridgeFailure } from '../../src/util/errors';
+import { sha256Hex } from '../../src/util/hash';
 import { ASK_HANDLERS, FakeExtension, OpError, pairFake } from '../helpers/fakeExtension';
 import { data, startTestServer, tempHome, until, type TestServer } from '../helpers/server';
 
 const ID = '6ad3f5e3-4464-83ed-8167-4abe151af1ff';
+
+/** `turns.read` answering with `markdown` and, when given, one file the reply offers. */
+function readBack(markdown: string, withFile = false) {
+  return () => ({
+    markdown,
+    turnKey: 't-2',
+    textSha256: sha256Hex(markdown),
+    files: withFile
+      ? [{ kind: 'sandbox', label: 'a.csv', href: 'sandbox:/mnt/data/a.csv', controlRef: 'm-a' }]
+      : [],
+  });
+}
+
+/** Whether the job wrote a `response.md`. */
+async function wroteResponse(server: TestServer, jobId: string): Promise<boolean> {
+  return access(join(server.paths.jobs, jobId, 'output', 'response.md')).then(
+    () => true,
+    () => false,
+  );
+}
 
 let t: TestServer | undefined;
 let fake: FakeExtension | undefined;
@@ -121,9 +143,55 @@ describe('voyager read', () => {
     expect(fake.tasks.at(-1)).toMatchObject({ op: 'conversation.close', params: { tabId: 7 } });
     expect(await readLastConversation(t.paths)).toBeUndefined();
   });
+
+  it('fails as unverified, writing no response.md, when the reply reads back with no text and no files', async () => {
+    const { t, fake } = await setup();
+    fake.handlers['turns.read'] = readBack(' \n');
+    const jobId = await submit(t, 'read', { conversationId: ID, keepTab: false });
+    const job = await finished(t, jobId);
+
+    expect(job.status).toBe('failed');
+    expect(job.error).toMatchObject({ code: 'unverified', details: { conversationId: ID } });
+    expect(await wroteResponse(t, jobId)).toBe(false);
+    expect(fake.tasks.at(-1)).toMatchObject({ op: 'conversation.close', params: { tabId: 7 } });
+    expect(await readLastConversation(t.paths)).toBeUndefined();
+  });
+
+  it.each([
+    ['no text', ''],
+    ['only whitespace', '  \n'],
+  ])('succeeds when the reply offers files and %s', async (_name, markdown) => {
+    const { t, fake } = await setup();
+    fake.handlers['turns.read'] = readBack(markdown, true);
+    const job = await finished(
+      t,
+      await submit(t, 'read', { conversationId: ID, keepTab: false, noFiles: true }),
+    );
+
+    expect(job.status).toBe('succeeded');
+    expect(await readFile(String(job.result?.responsePath), 'utf8')).toBe(markdown);
+  });
 });
 
 describe('voyager ask in an existing conversation', () => {
+  it('fails after the send when the reply reads back empty, and says not to resend', async () => {
+    const { t, fake } = await setup();
+    fake.handlers['turns.read'] = readBack('');
+    const jobId = await submit(t, 'ask', {
+      prompt: 'and now?',
+      keepTab: false,
+      conversationId: ID,
+    });
+    const job = await finished(t, jobId);
+
+    expect(job.status).toBe('failed');
+    expect(job.error?.code).toBe('unverified');
+    expect(job.error?.message).toContain('do not resend');
+    expect(job.error?.message).toContain(`voyager read ${ID}`);
+    expect(await wroteResponse(t, jobId)).toBe(false);
+    expect(fake.tasks.filter((task) => task.op === 'composer.send')).toHaveLength(1);
+  });
+
   it('opens the given conversation instead of a new chat and sends there', async () => {
     const { t, fake } = await setup();
     const job = await finished(

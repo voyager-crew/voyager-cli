@@ -38,7 +38,7 @@ voyager ask --json --continue "And the edge cases?" # the conversation of the la
 
 To follow up, pass the `conversationId` your own earlier `ask` returned with `--chat`. `--continue` takes the last conversation any voyager job on this machine used, which another agent may have changed in between; it is for a person typing at a terminal.
 
-Links may be `/c/<id>`, `/g/<gpt-or-project>/c/<id>`, or the bare id. `read` sends nothing; if the last reply is still being written it fails with `unverified`, so wait and read again later. `--continue` without an earlier success is `bad-request`; `--chat` and `--continue` exclude each other. A ChatGPT Work conversation is `mode-unavailable`: voyager only asks in chat-mode conversations, so tell the person.
+Links may be `/c/<id>`, `/g/<gpt-or-project>/c/<id>`, or the bare id. `read` sends nothing; if the last reply is still being written, or reads back with no text and no files, it fails with `unverified`, so wait and read again later. An `ask` whose reply reads back that empty fails the same way after the send: do not ask again, `voyager read` its conversation. `--continue` without an earlier success is `bad-request`; `--chat` and `--continue` exclude each other. A ChatGPT Work conversation is `mode-unavailable`: voyager only asks in chat-mode conversations, so tell the person.
 
 ## Projects
 

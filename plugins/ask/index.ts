@@ -44,6 +44,7 @@ import {
   inBridgeTab,
   openBridgeTab,
   presentResponse,
+  requireReplyContent,
   responseBlock,
   saveReplyFiles,
   saveResponse,
@@ -327,6 +328,7 @@ async function askInTab(
     conversationId: sent.conversationId,
     assistantTurnKey: reply.assistantTurnKey,
   });
+  requireReplyContent(read, sent.conversationId, true);
 
   const saved = await saveResponse(ctx, read);
   const { responsePath } = saved;

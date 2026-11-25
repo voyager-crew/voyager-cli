@@ -3,8 +3,8 @@
  * finished reply into `output/response.md` and the files it offers into
  * `output/files/` (unless `--no-files`), close the tab (also after a
  * failure; `--keep-tab` keeps it). Nothing is typed or
- * sent; a reply still being written is refused (`unverified`), never swapped
- * for an earlier one.
+ * sent; a reply still being written, or one that reads back with no text and
+ * no files, is refused (`unverified`), never swapped for an earlier one.
  */
 import {
   definePlugin,
@@ -19,6 +19,7 @@ import {
   inBridgeTab,
   openBridgeTab,
   presentResponse,
+  requireReplyContent,
   responseBlock,
   saveReplyFiles,
   saveResponse,
@@ -56,6 +57,7 @@ async function run(ctx: JobContext, input: ReadInput): Promise<JobResult> {
       conversationId: input.conversationId,
       latest: true,
     });
+    requireReplyContent(read, input.conversationId, false);
     const saved = await saveResponse(ctx, read);
     await ctx.checkpoint('read', { turnKey: read.turnKey, responsePath: saved.responsePath });
     const { files, failedFiles } = await saveReplyFiles(ctx, read, saved, {
